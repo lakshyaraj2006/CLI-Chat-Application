@@ -94,13 +94,40 @@ void handle_client_data(int index) {
     c->recv_buf[c->recv_len] = '\0';
     
     if (!c->registered) {
-        char *newline = strchr(c->recv_buf, '\n');
+        // The client encrypts the entire REGISTER command including the '\n'.
+        // So we can't find '\n' in the raw encrypted data.
+        // We need to try KPA first: assume the plaintext starts with "REGIST"
+        // to extract the key, decrypt, then find the newline.
+        
+        if (c->recv_len < 6) {
+            // Not enough data yet to attempt KPA
+            return;
+        }
+        
+        // Extract key via Known Plaintext Attack (first 6 bytes should decrypt to "REGIST")
+        char extracted_key[7];
+        const char *prefix = "REGIST";
+        for (int k = 0; k < 6; k++) {
+            extracted_key[k] = c->recv_buf[k] ^ prefix[k];
+        }
+        extracted_key[6] = '\0';
+        
+        // Decrypt the entire buffer with the extracted key
+        char *dec_buf = (char*)malloc(c->recv_len + 1);
+        memcpy(dec_buf, c->recv_buf, c->recv_len);
+        dec_buf[c->recv_len] = '\0';
+        repeatedXOR((unsigned char*)dec_buf, c->recv_len, (unsigned char*)extracted_key);
+        
+        // Now look for newline in the decrypted buffer
+        char *newline = strchr(dec_buf, '\n');
         if (!newline) {
+            // Incomplete data, wait for more (but guard against oversized buffers)
+            free(dec_buf);
             if (c->recv_len > 1024) remove_client(index);
             return;
         }
         
-        int cmd_len = newline - c->recv_buf;
+        int cmd_len = newline - dec_buf;
         int next_cmd_offset = cmd_len + 1;
         
         *newline = '\0';
@@ -109,24 +136,22 @@ void handle_client_data(int index) {
             cmd_len--;
         }
         
-        RegisterData rd = register_parser(c->recv_buf);
-        
-        // Try KPA if registration was encrypted
-        if (!rd.valid && cmd_len >= 6) {
-            char extracted_key[7];
-            const char *prefix = "REGIST";
-            for (int k = 0; k < 6; k++) {
-                extracted_key[k] = c->recv_buf[k] ^ prefix[k];
-            }
-            extracted_key[6] = '\0';
-            
-            char *dec_buf = _strdup(c->recv_buf);
-            repeatedXOR((unsigned char*)dec_buf, cmd_len, (unsigned char*)extracted_key);
-            rd = register_parser(dec_buf);
-            free(dec_buf);
-        }
+        // Parse the decrypted registration command
+        // Use a copy since register_parser uses strtok which modifies the string
+        char *parse_buf = _strdup(dec_buf);
+        RegisterData rd = register_parser(parse_buf);
+        free(parse_buf);
+        free(dec_buf);
         
         if (rd.valid) {
+            // Verify the extracted key matches the key in the command
+            if (strcmp(rd.key, extracted_key) != 0) {
+                char err[] = "ERROR invalid command format\n";
+                send(c->socket, err, strlen(err), 0);
+                remove_client(index);
+                return;
+            }
+            
             if (registerUser(rd.username, rd.key, c->addr)) {
                 c->registered = 1;
                 strcpy(c->username, rd.username);
@@ -191,7 +216,7 @@ void handle_client_data(int index) {
                 if (target) {
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].registered && strcmp(clients[j].username, md.target_user) == 0) {
-                            char fwd[BUFFER_SIZE + 64];
+                            char fwd[MAX_MSG_SIZE + 64];
                             sprintf(fwd, "FROM %s: %s\n", c->username, md.message);
                             send_encrypted(clients[j].socket, clients[j].key, fwd, strlen(fwd));
                             break;
@@ -297,6 +322,9 @@ void handle_client_data(int index) {
 }
 
 int main() {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         printf("WSAStartup failed.\n");
