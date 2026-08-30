@@ -17,7 +17,7 @@ typedef struct
 typedef struct
 {
     char target_user[9];
-    char message[BUFFER_SIZE];
+    char message[MAX_MSG_SIZE];
     int valid;
 } MessageData;
 
@@ -93,7 +93,7 @@ static inline RegisterData register_parser(char *str)
     return result;
 }
 
-static inline MessageData message_parser(char *str)
+static inline MessageData message_parser(const char *str)
 {
     MessageData result;
 
@@ -101,71 +101,51 @@ static inline MessageData message_parser(char *str)
     result.target_user[0] = '\0';
     result.message[0] = '\0';
 
-    char *tokens[10];
-    int cnt = 0;
-
-    /*
-     * Split only at the first ':'.
-     * This allows ':' to remain inside the message.
-     */
-    char *separator = strchr(str, ':');
-
-    if (separator == NULL)
+    if (strncmp(str, "SEND TO ", 8) != 0)
     {
-        printf("Invalid command format.\n");
         return result;
     }
 
-    *separator = '\0';
+    const char *p = str + 8;
+    while (*p == ' ') p++;
+    if (*p == '\0') return result;
 
-    char *command_part = str;
-    char *message_part = separator + 1;
-
-    trim_spaces(command_part);
-    trim_spaces(message_part);
-
-    char *subtokens[10];
-    int cnt1 = 0;
-
-    char *subtoken = strtok(command_part, " ");
-
-    while (subtoken != NULL)
+    char *colon = strchr(p, ':');
+    if (colon != NULL)
     {
-        if (cnt1 >= 10)
+        size_t target_len = colon - p;
+        if (target_len == 0 || target_len > 8) return result;
+        strncpy(result.target_user, p, target_len);
+        result.target_user[target_len] = '\0';
+        while (target_len > 0 && result.target_user[target_len - 1] == ' ')
         {
-            break;
+            result.target_user[--target_len] = '\0';
         }
 
-        subtokens[cnt1++] = subtoken;
-        subtoken = strtok(NULL, " ");
-    }
-
-    if (cnt1 != 3 ||
-        strcmp(subtokens[0], "SEND") != 0 ||
-        strcmp(subtokens[1], "TO") != 0)
-    {
-        printf("Invalid command format.\n");
+        const char *msg = colon + 1;
+        while (*msg == ' ') msg++;
+        if (strlen(msg) >= MAX_MSG_SIZE) return result;
+        strcpy(result.message, msg);
+        result.valid = (target_len > 0 && strlen(result.message) > 0);
         return result;
     }
-
-    if (strlen(subtokens[2]) > 8)
+    else
     {
-        printf("Invalid username.\n");
+        char *space = strchr(p, ' ');
+        if (space == NULL) return result;
+
+        size_t target_len = space - p;
+        if (target_len == 0 || target_len > 8) return result;
+        strncpy(result.target_user, p, target_len);
+        result.target_user[target_len] = '\0';
+
+        const char *msg = space + 1;
+        while (*msg == ' ') msg++;
+        if (strlen(msg) >= MAX_MSG_SIZE) return result;
+        strcpy(result.message, msg);
+        result.valid = (target_len > 0 && strlen(result.message) > 0);
         return result;
     }
-
-    if (strlen(message_part) >= BUFFER_SIZE)
-    {
-        printf("Message too large.\n");
-        return result;
-    }
-
-    strcpy(result.target_user, subtokens[2]);
-    strcpy(result.message, message_part);
-
-    result.valid = 1;
-
-    return result;
 }
 
 #endif /* SERVER_PARSER_H */

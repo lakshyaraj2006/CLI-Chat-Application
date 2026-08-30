@@ -1,0 +1,1 @@
+REGISTER rudras KEY abc123

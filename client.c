@@ -52,14 +52,26 @@ unsigned __stdcall receive_thread(void* arg) {
         recv_buf[recv_len] = '\0';
         
         if (!is_registered) {
-            // Before registration, server responses (like ERROR) might not be encrypted?
-            // Actually, in server.c, if register fails, it sends ERROR unencrypted:
-            // send(c->socket, err, strlen(err), 0);
-            // If succeeds, it sends REGISTERED encrypted:
-            // send_encrypted(c->socket, c->key, response, strlen(response));
+            // Server sends ERROR in plaintext, REGISTERED encrypted.
+            // We need to try both: check plaintext for ERROR, decrypt for REGISTERED.
             
-            // So we must try to check if it's plaintext ERROR or encrypted REGISTERED.
-            // Let's decrypt to a temp buf
+            // First, check for plaintext ERROR (server sends errors unencrypted)
+            char* plain_newline = strchr(recv_buf, '\n');
+            if (plain_newline && strncmp(recv_buf, "ERROR", 5) == 0) {
+                *plain_newline = '\0';
+                printf("\nserver$ %s\n", recv_buf);
+                int consumed = (int)(plain_newline - recv_buf) + 1;
+                if (recv_len > consumed) {
+                    memmove(recv_buf, recv_buf + consumed, recv_len - consumed);
+                }
+                recv_len -= consumed;
+                print_prompt();
+                continue;
+            }
+            
+            // Try decrypting the entire buffer to find REGISTERED response
+            // The '\n' delimiter is also encrypted, so we can't find it in raw data.
+            // We must decrypt and then search for '\n' in the decrypted result.
             char* temp_buf = (char*)malloc(recv_len + 1);
             memcpy(temp_buf, recv_buf, recv_len);
             temp_buf[recv_len] = '\0';
@@ -67,34 +79,28 @@ unsigned __stdcall receive_thread(void* arg) {
             repeatedXOR((unsigned char*)temp_buf, recv_len, (unsigned char*)current_key);
             
             char* newline = strchr(temp_buf, '\n');
-            char* plain_newline = strchr(recv_buf, '\n');
             
-            int consumed = 0;
-            
-            if (plain_newline && strncmp(recv_buf, "ERROR", 5) == 0) {
-                *plain_newline = '\0';
-                printf("\nserver$ %s\n", recv_buf);
-                consumed = (plain_newline - recv_buf) + 1;
-                print_prompt();
-            } else if (newline && strncmp(temp_buf, "REGISTERED", 10) == 0) {
+            if (newline && strncmp(temp_buf, "REGISTERED", 10) == 0) {
                 *newline = '\0';
                 printf("\nserver$ %s\n", temp_buf);
                 is_registered = 1;
-                consumed = (newline - temp_buf) + 1;
+                int consumed = (int)(newline - temp_buf) + 1;
+                if (recv_len > consumed) {
+                    memmove(recv_buf, recv_buf + consumed, recv_len - consumed);
+                }
+                recv_len -= consumed;
                 print_prompt();
-            } else if (plain_newline || newline) {
-                // Unknown, just consume one line to avoid infinite loop
-                consumed = plain_newline ? (plain_newline - recv_buf) + 1 : (newline - temp_buf) + 1;
-            }
-            
-            free(temp_buf);
-            
-            if (consumed > 0) {
+            } else if (newline) {
+                // Unknown decrypted response, consume one line to avoid infinite loop
+                int consumed = (int)(newline - temp_buf) + 1;
                 if (recv_len > consumed) {
                     memmove(recv_buf, recv_buf + consumed, recv_len - consumed);
                 }
                 recv_len -= consumed;
             }
+            // else: incomplete data, wait for more bytes
+            
+            free(temp_buf);
             continue;
         }
         
@@ -201,6 +207,9 @@ unsigned __stdcall receive_thread(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    
     if (argc != 3) {
         printf("Usage: %s <server_ip> <port>\n", argv[0]);
         return 1;
@@ -236,7 +245,7 @@ int main(int argc, char *argv[]) {
     
     _beginthreadex(NULL, 0, receive_thread, NULL, 0, NULL);
     
-    char input[BUFFER_SIZE];
+    char input[1024];
     
     while (running) {
         print_prompt();
@@ -308,7 +317,7 @@ int main(int argc, char *argv[]) {
                 send_encrypted(client_socket, current_key, send_buf, header_len + fsize);
                 free(send_buf);
             } else {
-                char out_buf[BUFFER_SIZE];
+                char out_buf[1024];
                 sprintf(out_buf, "%s\n", input);
                 send_encrypted(client_socket, current_key, out_buf, strlen(out_buf));
                 
